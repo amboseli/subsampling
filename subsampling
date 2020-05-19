@@ -1,0 +1,767 @@
+# Make connections to the biograph, members, maturedates, rankdates tables
+biograph <- tbl(babase, "biograph")
+members <- tbl(babase, "members")
+maturedates <- tbl(babase, "maturedates")
+rankdates <- tbl(babase, "rankdates")
+groups_history_l <- collect(tbl(babase, "groups_history"))
+actor_actees <-tbl(babase, "actor_actees")
+
+#Get local copy of biograph, members
+biograph_l <- collect(tbl(babase, "biograph"))
+members_full <- collect(tbl(babase, "members"))
+
+
+# Find behavior gaps that overlap records in members_keep
+behave_gaps <- dplyr::tbl(babase, "behave_gaps")
+behave_gaps_l <-collect(behave_gaps)
+
+
+##look at census distribution
+census <- dplyr::tbl(babase, "census")
+census_l <-collect(census)
+
+
+###get group names
+groups <-dplyr::tbl(babase, "groups")
+groups_l <-collect(groups)
+
+
+#get mature and rank dates for females and males
+md_females <- maturedates %>%
+  semi_join(filter(biograph, sex == "F"), by = "sname")
+
+rd_males <- rankdates %>%
+  semi_join(filter(biograph, sex == "M"), by = "sname")
+
+rd_males_l <- collect(rd_males)
+md_females_l <-collect(md_females)
+
+# Load plotting packages
+library(ggplot2, quietly = TRUE)
+library(GGally, quietly = TRUE)
+library(grid, quietly = TRUE)
+
+
+##create iyol dataset----------------------------------
+members_l <- subset_members(babase)
+focals_l <- subset_focals(babase, members_l)
+females_l <- subset_females(members_l)
+grooming_l <- subset_interactions(babase, members_l, my_acts = c("G"))
+
+iyol_final<-make_iyol(babase, members_l, focals_l, grooming_l, .adults_only = TRUE)
+iyol_final<-iyol_final%>%
+  filter(sex=="F")
+
+subjects_F <- biograph_l %>%
+  filter(matgrp < 3 & matgrp != 1.3 &
+           bstatus < 1 & 
+           !is.na(pid) &
+           sex=="F" &
+           sname %in% iyol_final$sname &
+           (statdate - birth) / 365.25 >= 4) %>%
+  select(sname, name, pid, birth, bstatus, sex, matgrp, statdate, status) %>%
+  mutate(age=(statdate-birth)/365.25, dead = status==1)
+
+#Proportional Rank--------------------------------
+
+#1. get rank data
+ranks <- tbl(babase, "ranks") %>%
+  filter(rnktype %in% c("ADF", "ADM")) %>%
+  collect() %>%
+  group_by(grp, rnkdate, rnktype) %>%
+  dplyr::mutate(proprank = 1 - (rank - 1) / (n() - 1)) %>%
+   dplyr::rename(date = rnkdate) %>%
+  dplyr::mutate(yearmon = as.character(as.yearmon(date))) %>%
+  ungroup() 
+
+
+mean_ranks <- iyol_final %>%
+  inner_join( dplyr::rename(ranks, obs_date = date), by = c("sname", "grp")) %>%
+  filter(obs_date >= start & obs_date <= end) %>%
+  group_by(sname, age_class, grp) %>%
+   dplyr::summarise(n_ranks = n())
+
+iyol_final <- iyol_final %>%
+  left_join(mean_ranks, by = c("sname", "grp", "age_class")) %>%
+  collect()
+
+#2. Keep only individuals that were ranked for all months (n=12) in a year of life
+mean_ranks <- ranks %>%
+  left_join(select(iyol_final, sname, start, end, grp, n_ranks) , by=c('sname', 'grp')) %>%
+filter(date >= start & date <= end) %>%
+  filter(n_ranks==12) %>%
+  group_by(sname, start) %>%
+  dplyr::mutate(keep=sample(1:12, 12, replace=F)) %>%
+  ungroup() 
+
+#3. Join rank data to iyol
+iyol_ranks<- select(iyol_final, -n_ranks) %>%
+  inner_join(mean_ranks, by = c("sname", "grp", 'start'))
+
+#4. Function to subsample ranks; x is the number of samples you want to take from 12 (full dataset) to 1 (only one month out of 12)
+rank_sub <- function(x) { iyol_ranks %>%
+    filter(keep<=x) %>%
+    group_by(sname, age_class, grp) %>%
+    dplyr::summarise(mean_rank = mean(rank, na.rm = TRUE),
+                     mean_prop_rank = mean(proprank, na.rm = TRUE),
+                     n_ranks = n())}
+
+  #apply function to subsamples of 1 to 12 months
+  mean_ranks_comb <- lapply(c(1:12), rank_sub) 
+
+  #combines lists to one dataframe 
+  iyol_final_ranks <-mean_ranks_comb[[1]]%>%
+    left_join(mean_ranks_comb[[2]], by = c("sname", "grp", "age_class")) %>%
+    rename(mean_prop_rank1=mean_prop_rank.x,
+           mean_rank1=mean_rank.x,
+           n_ranks1=n_ranks.x,
+           mean_prop_rank2=mean_prop_rank.y,
+           mean_rank2=mean_rank.y,
+           n_ranks2=n_ranks.y) %>%
+    left_join(mean_ranks_comb[[3]], by = c("sname", "grp", "age_class")) %>%
+    rename(mean_prop_rank3=mean_prop_rank,
+           mean_rank3=mean_rank,
+           n_ranks3=n_ranks) %>%
+    left_join(mean_ranks_comb[[4]], by = c("sname", "grp", "age_class")) %>%
+    rename(mean_prop_rank4=mean_prop_rank,
+           mean_rank4=mean_rank,
+           n_ranks4=n_ranks)%>%
+    left_join(mean_ranks_comb[[5]], by = c("sname", "grp", "age_class")) %>%
+    rename(mean_prop_rank5=mean_prop_rank,
+           mean_rank5=mean_rank,
+           n_ranks5=n_ranks)%>%
+    left_join(mean_ranks_comb[[6]], by = c("sname", "grp", "age_class")) %>%
+    rename(mean_prop_rank6=mean_prop_rank,
+           mean_rank6=mean_rank,
+           n_ranks6=n_ranks)%>%
+    left_join(mean_ranks_comb[[7]], by = c("sname", "grp", "age_class")) %>%
+    rename(mean_prop_rank7=mean_prop_rank,
+           mean_rank7=mean_rank,
+           n_ranks7=n_ranks)%>%
+    left_join(mean_ranks_comb[[8]], by = c("sname", "grp", "age_class")) %>%
+    rename(mean_prop_rank8=mean_prop_rank,
+           mean_rank8=mean_rank,
+           n_ranks8=n_ranks)%>%
+    left_join(mean_ranks_comb[[9]], by = c("sname", "grp", "age_class")) %>%
+    rename(mean_prop_rank9=mean_prop_rank,
+           mean_rank9=mean_rank,
+           n_ranks9=n_ranks)%>%
+    left_join(mean_ranks_comb[[10]], by = c("sname", "grp", "age_class")) %>%
+    rename(mean_prop_rank10=mean_prop_rank,
+           mean_rank10=mean_rank,
+           n_ranks10=n_ranks)%>%
+    left_join(mean_ranks_comb[[11]], by = c("sname", "grp", "age_class")) %>%
+    rename(mean_prop_rank11=mean_prop_rank,
+           mean_rank11=mean_rank,
+           n_ranks11=n_ranks)%>%
+    left_join(mean_ranks_comb[[12]], by = c("sname", "grp", "age_class")) %>%
+    rename(mean_prop_rank12=mean_prop_rank,
+           mean_rank12=mean_rank,
+           n_ranks12=n_ranks) %>%
+    ungroup
+
+
+  #reformats dataframe for plotting (removes names etc)
+  final_ranks <- select(iyol_final_ranks, mean_prop_rank1, mean_prop_rank2, mean_prop_rank3, 
+                      mean_prop_rank4, mean_prop_rank5, mean_prop_rank6, mean_prop_rank7, 
+                      mean_prop_rank8, mean_prop_rank9, mean_prop_rank10, mean_prop_rank11, mean_prop_rank12) %>%
+   dplyr::rename('1'=mean_prop_rank1, '2'=mean_prop_rank2,'3'=mean_prop_rank3,'4'=mean_prop_rank4,
+         '5'=mean_prop_rank5,'6'=mean_prop_rank6,'7'=mean_prop_rank7,'8'=mean_prop_rank8,
+         '9'=mean_prop_rank9,'10'=mean_prop_rank10,'11'=mean_prop_rank11,'12'=mean_prop_rank12)
+
+
+# Generate plot
+# Load theme for ggplot2
+  theme_set(theme_bw())
+  ggpairs(final_ranks[,c(1,4,8,12)], title = "Proportional Ranks", axisLabels="show")
+  ggpairs(final_ranks, title = "Proportional Ranks")
+
+
+#Cycling--------------------------------
+  
+  ## Percent of time cycling in previous year
+  repstats <- collect(tbl(babase, "repstats_grp"))
+  repstats$state <- factor(repstats$state, labels = c("Cycling", "Lactating", "Pregnant"))
+  
+  # repstat on start date of iyol
+  repstats_iyol <- repstats %>%
+    right_join(select(iyol_final, sname,start, end), 
+               by = c("sname")) %>%
+    filter(date >= start & date <= end)
+  
+  #keep only individuals with full years of data
+  repstats_iyol <- repstats_iyol %>%
+    group_by(sname, start, end, .drop = FALSE) %>%
+    tally(name = "n_days") %>%
+    ungroup() %>%
+    left_join(repstats, by=c('sname')) %>%
+    filter(date >= start & date <= end, n_days==365) %>%
+    group_by(sname, start) %>%
+    dplyr::mutate(keep=sample(1:365, 365, replace=F)) %>%
+    ungroup() 
+  
+  ###subsetting function
+   percyc_sub <- function(x){ repstats_iyol %>%
+    filter(keep<=x)  %>%
+    group_by(sname,start, end, state, .drop = FALSE) %>%
+    tally(name = "n_days") %>%
+    ungroup() %>%
+    group_by(sname, start, end) %>%
+    dplyr::mutate(percent_days = n_days / sum(n_days), n_days_total=sum(n_days)) %>%
+    filter(state == "Cycling") %>%
+    ungroup() %>%
+     dplyr::rename(n_days_cycling = n_days, percent_days_cycling = percent_days) }
+  
+ ##apply subsetting function to a variety of subsets from 5 days to 365 days
+  repstats_comb <- lapply(c(5,20,60,120,180,240,300,365), percyc_sub) 
+
+ 
+   ###join dataframes from the list for plotting
+   iyol_final_cyc <-repstats_comb[[1]]%>%
+     left_join(repstats_comb[[2]], by = c("sname", "start", "end", 'state')) %>%
+     rename(n_days_cycling5=n_days_cycling.x,
+            percent_days_cycling5=percent_days_cycling.x,
+            n_days_total5=n_days_total.x,
+            n_days_cycling20=n_days_cycling.y,
+            percent_days_cycling20=percent_days_cycling.y,
+            n_days_total20=n_days_total.y) %>%
+     left_join(repstats_comb[[3]], by = c("sname", "start", "end", 'state')) %>%
+     rename(n_days_cycling60=n_days_cycling,
+            percent_days_cycling60=percent_days_cycling,
+            n_days_total60=n_days_total) %>%
+     left_join(repstats_comb[[4]], by = c("sname", "start", "end", 'state')) %>%
+     rename(n_days_cycling120=n_days_cycling,
+            percent_days_cycling120=percent_days_cycling,
+            n_days_total120=n_days_total)%>%
+     left_join(repstats_comb[[5]], by = c("sname", "start", "end", 'state')) %>%
+     rename(n_days_cycling180=n_days_cycling,
+            percent_days_cycling180=percent_days_cycling,
+            n_days_total180=n_days_total)%>%
+     left_join(repstats_comb[[6]], by = c("sname", "start", "end", 'state')) %>%
+     rename(n_days_cycling240=n_days_cycling,
+            percent_days_cycling240=percent_days_cycling,
+            n_days_total240=n_days_total)%>%
+     left_join(repstats_comb[[7]], by = c("sname", "start", "end", 'state')) %>%
+     rename(n_days_cycling300=n_days_cycling,
+            percent_days_cycling300=percent_days_cycling,
+            n_days_total300=n_days_total)%>%
+     left_join(repstats_comb[[8]], by = c("sname", "start", "end", 'state')) %>%
+     rename(n_days_cycling365=n_days_cycling,
+            percent_days_cycling365=percent_days_cycling,
+            n_days_total365=n_days_total)
+   
+   ##reformat for plotting
+   final_cyc <- select(iyol_final_cyc,  percent_days_cycling5, percent_days_cycling20, percent_days_cycling60, percent_days_cycling120, percent_days_cycling180, percent_days_cycling240, 
+                      percent_days_cycling300, percent_days_cycling365) %>%
+    filter(!is.na(percent_days_cycling300))%>%
+     dplyr::rename('5 d'=percent_days_cycling5,'20 d'=percent_days_cycling20, '60 d'=percent_days_cycling60, '120 d'=percent_days_cycling120,'180 d'=percent_days_cycling180,'240 d'=percent_days_cycling240,
+           '300 d'=percent_days_cycling300,'365 d'=percent_days_cycling365) 
+
+  ##correlation plots
+  ggpairs(final_cyc, title = "Percent Cycling")
+  
+  
+  
+  # Percent-infant-3mo ---------------------------------------------------
+  
+  ##Find names of potential moms
+  dsi_mom_snames <- iyol_final %>%
+    filter(sex == "F") %>%
+    pull(sname) %>%
+    unique()
+  
+  #Find kids's names
+  dsi_kids <- biograph_l %>%
+    drop_na(sname) %>%
+    select(kid_sname = sname, kid_pid = pid, kid_birth = birth) %>%
+    mutate(mom_sname = str_sub(kid_pid, 1, 3)) %>%
+    filter(mom_sname %in% dsi_mom_snames)
+  
+  dsi_kid_snames <- unique(dsi_kids$kid_sname)
+  
+  dsi_kid_members <- biograph_l %>%
+    filter(sname %in% dsi_kid_snames) %>%
+    inner_join(members_full) %>%
+    select(kid_sname = sname, kid_birth = birth, date, grp)
+  
+  dsi_kid_members <- dsi_kid_members %>%
+    filter(date <= kid_birth + months(3)) %>%
+    left_join(select(dsi_kids, kid_sname, mom_sname))
+  
+  ###subsetting function
+  days_inf<- function(x){
+ iyol_final %>%
+    inner_join(select(members_full, sname, date), by = c('sname')) %>%
+    filter(date >= start & date <= end) %>%
+    group_by(sname, start) %>%
+     dplyr::summarise(days_present_infant=n()) %>%
+    left_join(iyol_final, by=c('sname', 'start')) %>%
+    inner_join(select(members_full, sname, date), by = c('sname')) %>%
+    filter(date >= start & date <= end) %>%
+    filter(days_present_infant==365) %>%
+     group_by(sname, start) %>%
+    dplyr::mutate(keep=sample(1:days_present_infant, days_present_infant, replace=F)) %>%
+    ungroup()  %>%
+    filter(keep<=(x)) %>%
+    inner_join(dsi_kid_members, by=c('sname'='mom_sname', 'grp', 'date')) %>%
+    group_by(sname, start) %>%
+     dplyr::summarise(days_kid_present=n(), days_present_infant=mean(days_present_infant))%>%
+    ungroup()%>%
+    dplyr::mutate(percent_days_infant=days_kid_present/x)
+      }
+  
+  
+  ##apply subsetting function to a variety of subsets from 5 days to 365 days
+    days_inf_comb <- lapply(c(5,20,60,120,180,240,300,365), days_inf) 
+  
+  ###join dataframes from the list for plotting
+    iyol_final_inf <- days_inf_comb[[1]]%>%
+    left_join(days_inf_comb[[2]], by = c("sname", "start")) %>%
+    rename(days_kid_present5=days_kid_present.x,
+           days_present_infant5=days_present_infant.x,
+           percent_days_infant5=percent_days_infant.x,
+           days_kid_present20=days_kid_present.y,
+           days_present_infant20=days_present_infant.y,
+           percent_days_infant20=percent_days_infant.y) %>%
+    left_join(days_inf_comb[[3]], by = c("sname", "start")) %>%
+    rename(days_kid_present60=days_kid_present,
+           days_present_infant60=days_present_infant,
+           percent_days_infant60=percent_days_infant) %>%
+    left_join(days_inf_comb[[4]], by = c("sname", "start")) %>%
+    rename(days_kid_present120=days_kid_present,
+           days_present_infant120=days_present_infant,
+           percent_days_infant120=percent_days_infant)%>%
+    left_join(days_inf_comb[[5]], by = c("sname", "start")) %>%
+    rename(days_kid_present180=days_kid_present,
+           days_present_infant180=days_present_infant,
+           percent_days_infant180=percent_days_infant)%>%
+    left_join(days_inf_comb[[6]], by = c("sname", "start")) %>%
+    rename(days_kid_present240=days_kid_present,
+           days_present_infant240=days_present_infant,
+           percent_days_infant240=percent_days_infant)%>%
+    left_join(days_inf_comb[[7]], by = c("sname", "start")) %>%
+    rename(days_kid_present300=days_kid_present,
+           days_present_infant300=days_present_infant,
+           percent_days_infant300=percent_days_infant)%>%
+    left_join(days_inf_comb[[8]], by = c("sname", "start")) %>%
+    rename(days_kid_present365=days_kid_present,
+           days_present_infant365=days_present_infant,
+           percent_days_infant365=percent_days_infant)
+  
+  
+  
+   ##reformat for plotting
+   percent_days_inf <- select(iyol_final_inf,  percent_days_infant5, percent_days_infant20, percent_days_infant60, percent_days_infant120, percent_days_infant180, percent_days_infant240, 
+                      percent_days_infant300, percent_days_infant365) %>%
+    filter(!is.na(percent_days_infant300))%>%
+    dplyr::rename('5 d'=percent_days_infant5,'20 d'=percent_days_infant20, '60 d'=percent_days_infant60, '120 d'=percent_days_infant120,'180 d'=percent_days_infant180,'240 d'=percent_days_infant240,
+                  '300 d'=percent_days_infant300,'365 d'=percent_days_infant365) 
+  
+    percent_days_inf <- select(percent_days_inf, '5 d', '20 d', '60 d', '120 d','180 d','240 d','300 d', '365 d')
+  
+  ##correlation plots
+  ggpairs(percent_days_inf, title = "Percent Days Infant")
+  
+  
+  
+  #########group size-----------------------------------------------
+  ###code below will give mean density but the number in each group is extrapolated to make sure there are no missing dates
+  # Find all adult members in each group on each date
+  adult_members <- members_full %>%
+    filter(grp < 3 & grp != 1.3) %>%
+    inner_join(select(biograph_l, sname, sex), by = "sname") %>%
+    left_join(select(md_females_l, sname, matured), by = "sname") %>%
+    left_join(select(rd_males_l, sname, ranked), by = "sname") %>%
+    filter((sex == "F" & date >= matured) | (sex == "M" & date >= ranked)) %>%
+    collect()
+  
+  # Get total counts of all adult members in each group (<3) on each date.  Not sure how appropriate this is for censored individuals.
+  adult_sex_counts <- adult_members %>%
+    group_by(grp, date, sex) %>%
+     dplyr::summarise(n_animals = n()) %>%
+    arrange(grp, date) %>%
+    spread(sex, n_animals, fill = 0) %>%
+    ungroup() %>%
+    dplyr::mutate(n_adults = F + M) %>%
+    select(grp, date, n_adults) %>%
+    dplyr::mutate(month_yr=floor_date(date, unit = "month"))
+  
+  ##join members
+  adult_sex_counts_members <- adult_sex_counts %>%
+    left_join(members_full, by=c('grp', 'date'))
+  
+  ###subsetting function
+  group_sz <- function(x){
+    mean_density_alldays <- iyol_final %>%
+      inner_join(adult_sex_counts_members, by = c("grp", 'sname')) %>%
+      filter(date >= start & date <= end) %>%
+      distinct() %>%
+      group_by(sname, start, grp) %>%
+       dplyr::summarise(days_present_grpsz=n()) %>%
+      left_join(iyol_final, by=c('sname', 'start', 'grp')) %>%
+      inner_join(adult_sex_counts_members, by = c("grp", 'sname')) %>%
+      filter(date >= start & date <= end) %>%
+      distinct() %>%
+      group_by(sname, start, grp) %>%
+      filter(days_present_grpsz==365) %>%
+      group_by(sname, start, grp) %>%
+      dplyr::mutate(keep=sample(1:days_present_grpsz, days_present_grpsz, replace=F)) %>%
+      ungroup()  %>%
+      filter(keep<=(x)) %>%
+      group_by(sname, age_class, start, grp) %>%
+       dplyr::summarise(mean_density = mean(n_adults, na.rm = TRUE),
+                n_density = n())%>%
+      ungroup()
+  }
+  
+  ##apply subsetting function to a variets of subsets from 1 day to 365 days
+  group_sz_comb <- lapply(c(5,20,60,120,180,240,300,365,1), group_sz) 
+  
+  ###join dataframes from the list for plotting
+  iyol_final_grpsz <- group_sz_comb[[1]]%>%
+    left_join(group_sz_comb[[2]], by = c("sname", "start", 'age_class', 'grp')) %>%
+    rename(mean_density5=mean_density.x,
+           n_density5=n_density.x,
+           mean_density20=mean_density.y,
+           n_density20=n_density.y) %>%
+    left_join(group_sz_comb[[3]], by = c("sname", "start", 'age_class', 'grp')) %>%
+    rename(mean_density60=mean_density,
+           n_density60=n_density) %>%
+    left_join(group_sz_comb[[4]], by = c("sname", "start", 'age_class', 'grp')) %>%
+    rename(mean_density120=mean_density,
+           n_density120=n_density)%>%
+    left_join(group_sz_comb[[5]], by = c("sname", "start", 'age_class', 'grp')) %>%
+    rename(mean_density180=mean_density,
+           n_density180=n_density)%>%
+    left_join(group_sz_comb[[6]], by = c("sname", "start", 'age_class', 'grp')) %>%
+    rename(mean_density240=mean_density,
+           n_density240=n_density)%>%
+    left_join(group_sz_comb[[7]], by = c("sname", "start", 'age_class', 'grp')) %>%
+    rename(mean_density300=mean_density,
+           n_density300=n_density)%>%
+    left_join(group_sz_comb[[8]], by = c("sname", "start", 'age_class', 'grp')) %>%
+    rename(mean_density365=mean_density,
+           n_density365=n_density)%>%
+    left_join(group_sz_comb[[9]], by = c("sname", "start", 'age_class', 'grp')) %>%
+    rename(mean_density1=mean_density,
+           n_density1=n_density)
+  
+  ##reformat for plotting
+    percent_group_sz <- select(iyol_final_grpsz, mean_density1, mean_density5, mean_density20, mean_density60, mean_density120, mean_density180, mean_density240, 
+                             mean_density300, mean_density365) %>%
+    filter(!is.na(mean_density300))%>%
+    dplyr::rename('1 d'=mean_density1,'5 d'=mean_density5,'20 d'=mean_density20, '60 d'=mean_density60, '120 d'=mean_density120,'180 d'=mean_density180,'240 d'=mean_density240,
+                  '300 d'=mean_density300,'365 d'=mean_density365) 
+  
+    percent_group_sz <- select(percent_group_sz, '1 d', '5 d', '20 d', '60 d', '120 d','180 d','240 d','300 d', '365 d')
+  
+    ##correlation plots
+  ggpairs(percent_group_sz, title = "Group Size")
+  
+  
+  
+  #######N Maternal Kin----------------------------------------
+  ##Moms---------------------------------------
+  #moms and kids name for each subject
+  moms <- subjects_F %>%
+    dplyr::mutate(kid_sname = sname,
+                  mom_sname = str_sub(pid, 1, 3))
+  
+  # Moms: check members table to see if mom present in same group on same date
+  
+  #iyol for each subject with the name of their mom
+  iyol_with_mom <- iyol_final %>%
+    inner_join(select(moms, sname, mom_sname), by = "sname")
+  
+  
+  ##group membership data for moms
+  mom_members <- select(members_l, date, sname, grp) %>%
+    filter(sname %in% moms$mom_sname) %>%
+    dplyr::mutate(month_yr=floor_date(date, unit = "month"))
+  
+  
+  ##group membership data for iyol subjects
+  iyol_final_mom <- iyol_final %>%
+    inner_join(select(members_l, sname, grp, date), by = c('sname', "grp")) %>%
+    filter(date >= start & date <= end)%>%
+    inner_join(select(moms, sname, mom_sname), by = "sname") %>%
+    dplyr::mutate(month_yr=floor_date(date, unit = "month"))
+  
+  
+  ##days mom was present 
+  mom_present <- iyol_final_mom %>%
+    #inner_join(select(moms, sname, mom_sname), by = "sname") %>%
+    semi_join(select(mom_members, mom_sname = sname, date, grp),
+              by = c("mom_sname", "grp", "date")) %>%
+    dplyr::mutate(mom_present = TRUE)
+  
+  ###mom absent
+  mom_absent <- iyol_final_mom %>%
+    #inner_join(select(moms, sname, mom_sname), by = "sname") %>%
+    anti_join(select(mom_members, mom_sname = sname, date, grp),
+              by = c("mom_sname", "grp", "date")) %>%
+    dplyr::mutate(mom_present = FALSE)
+  
+  # combine mom presence and absence data
+  mom_present <- bind_rows(mom_present, mom_absent) 
+  
+  
+  # Sisters---------------------------------
+  
+  #Step 1: find sister's names
+  pregs <- tbl(babase, "pregs") %>%
+    collect() %>%
+    dplyr::mutate(mom_sname = str_sub(pid, 1, 3))
+  
+  sibs <- moms %>%
+    inner_join(select(pregs, pid, kid_parity = parity), by = "pid") %>%
+    select(mom_sname, kid_sname, kid_birth = birth, kid_parity) %>%
+    inner_join(pregs, by = "mom_sname") %>%
+    inner_join(select(biograph_l, pid, sib_sname = sname, sib_birth = birth, sib_statdate = statdate), by = "pid") %>%
+    filter(kid_sname != sib_sname) %>%
+    dplyr::rename(sib_parity = parity)
+  
+  sisters <- sibs %>%
+    inner_join(select(biograph_l, sib_sname = sname, sib_sex = sex)) %>%
+    filter(sib_sex == "F") %>%
+    select(sname = kid_sname, sib_sname, sib_birth)
+  
+  
+  
+  #iyol for each subject with the name of their sister(s)
+  iyol_with_sisters <- iyol_final %>%
+    inner_join(select(sisters, sname, sib_sname, sib_birth), by = "sname")
+  
+  
+  
+  ##Step 2: get members data for sisters and days where subject and sister were both in the same group
+  ##group membership data for sisters
+  sister_members <- select(members_l, date, sname, grp) %>%
+    filter(sname %in% iyol_with_sisters$sib_sname)%>%
+    inner_join(select(md_females_l, sname, matured), 
+               by = c("sname")) %>%
+    filter(date >= matured)  %>%  ##only include mature sisters
+    dplyr::mutate(month_yr=floor_date(date, unit = "month"))
+  
+  
+  ##group membership data for iyol subjects
+  members_F_survival_adults_full_sisters <- iyol_final %>%
+    inner_join(select(members_l, sname, grp, date), by = c('sname', "grp")) %>%
+    filter(date >= start & date <= end)%>%
+    inner_join(select(sisters, sname, sib_sname, sib_birth), by = "sname") %>%
+    inner_join(select(iyol_with_sisters, sname, grp, start, end, sib_sname), 
+               by = c("sname", "start", "end", "sib_sname", "grp"))%>%
+    dplyr::mutate(month_yr=floor_date(date, unit = "month"))
+  
+  
+  
+  # Daughters---------------------
+  #Step 1: find daughter's names
+  daughters <- biograph_l %>%
+    filter(sex == "F") %>%
+    select(kid_sname = sname, kid_pid = pid, kid_birth = birth) %>%
+    dplyr::mutate(mom_sname = str_sub(kid_pid, 1, 3))
+  
+  
+  #iyol for each subject with the name of their daughter(s)
+  iyol_with_daughters <- iyol_final %>%
+    inner_join(select(daughters, mom_sname, kid_sname, kid_birth), by = c("sname"="mom_sname"))
+  
+  
+  ##Step 2: get members data for sisters and days where subject and sister were both in the same group
+  ##group membership data for daughters
+  daughter_members <- select(members_l, date, sname, grp) %>%
+    filter(sname %in% iyol_with_daughters$kid_sname)%>%
+    inner_join(select(md_females_l, sname, matured), 
+               by = c("sname")) %>%
+    filter(date >= matured)%>%  ##only include mature daughters
+    dplyr::mutate(month_yr=floor_date(date, unit = "month"))
+  
+  
+  ##group membership data for iyol subjects
+  members_F_survival_adults_full_daughters <- iyol_final %>%
+    inner_join(select(members_l, sname, grp, date), by = c('sname', "grp")) %>%
+    filter(date >= start & date <= end)%>%
+    inner_join(select(daughters, mom_sname, kid_sname, kid_birth), by = c("sname"="mom_sname")) %>%
+    inner_join(select(iyol_with_daughters, sname, grp, start, end, kid_sname), 
+               by = c("sname", "start", "end", "kid_sname", "grp"))%>%
+    dplyr::mutate(month_yr=floor_date(date, unit = "month"))
+  
+  
+  
+  days_matkin<-function(x){
+    
+    ##calulcate percent mom present
+    mom_per_present <- mom_present %>%
+      #filter(days_present_matkin==365) %>%
+      dplyr::group_by(sname, start) %>%
+      dplyr::summarise(days_present_matkin=n()) %>%
+      dplyr::ungroup()  %>%
+      left_join(mom_present, by=c('sname', 'start')) %>%
+      dplyr::group_by(sname, start) %>%
+      dplyr::mutate(keep=sample(1:days_present_matkin, days_present_matkin, replace=F)) %>%
+      dplyr::ungroup()  %>%
+      filter(keep<=(x*days_present_matkin)) %>%
+      group_by(sname, start, grp) %>%
+      dplyr::summarise(n_days_mom = sum(mom_present),
+                       n_days=n()) %>%
+      dplyr::mutate(percent_days_mom = n_days_mom / (n_days)) %>%
+      right_join(iyol_final, by=c('sname', 'start', 'grp'))
+    
+    
+    
+    ##Step 3: count number of days both sister and subject were in the same social group
+    
+    sisters_present <-members_F_survival_adults_full_sisters %>%
+      semi_join(select(sister_members, sname, grp, date ), 
+                by = c("sib_sname"="sname", "grp", "date")) %>%
+      filter(date >= start & date <= end) %>%
+      group_by(sname, start, grp) %>%
+      dplyr::summarise(days_present_matkin=n()) %>%
+      ungroup()  %>%
+      left_join(members_F_survival_adults_full_sisters, by=c('sname', 'start', 'grp')) %>%
+      semi_join(select(sister_members, sname, grp, date ), 
+                by = c("sib_sname"="sname", "grp", "date")) %>%
+      filter(date >= start & date <= end) %>%
+      group_by(sname, start, grp) %>%
+      dplyr::mutate(keep=sample(1:days_present_matkin, days_present_matkin, replace=F)) %>%
+      ungroup()  %>%
+      filter(keep<=(x*days_present_matkin)) %>%
+      group_by(sname, age_class, start, grp, sib_sname) %>%
+      tally(name = "n_days_sis") %>%
+      ungroup() %>%
+      inner_join(select(members_F_survival_adults_full_sisters, sname, age_class, start, end, grp, sib_sname), 
+                 by=c('sname', 'start', 'grp', 'age_class', "sib_sname")) %>%
+      distinct() 
+    
+    ##count all sisters that were in a social group in a given year and 
+    #divide that by the total number of days the subject was present in the group 
+    #to calculate an average number of sisters per day
+    
+    sisters_present2<-sisters_present%>%
+      group_by(sname, age_class, start, grp) %>%
+      dplyr::summarise(n_adult_sisters = n(),
+                       n_days_all_sis = sum(n_days_sis) #,
+                       #days_present_all_matsis = sum(days_present_matsis)
+      )%>%
+      ungroup()%>%
+      inner_join(select(members_F_survival_adults_full_sisters, sname, age_class, start, end, grp, days_present), 
+                 by=c('sname', 'start', 'grp', 'age_class')) %>%
+      distinct()%>%
+      dplyr::mutate(n_sis_per_day = n_days_all_sis / (x*days_present)) %>%
+      ungroup()
+    
+    
+    ###Step 4: add zeros for subjects that do not have sisters present
+    ##adds zeros for individuals who's sisters were not present (e.g., absent) or NAs for individuals where data are sparse/absent
+    sisters_members_temp <-iyol_final %>%
+      left_join(select(sisters_present2, sname, grp, start, n_adult_sisters, n_days_all_sis, n_sis_per_day), 
+                by = c("sname", "grp", "start")) %>%
+      dplyr::mutate(n_adult_sisters=ifelse(is.na(n_adult_sisters), 0, n_adult_sisters), # because rule for data inclusion are the same, if mean density is not NA this means that there truly were no sisters and this wasn't due to lack of data during a gap/fission period
+                    n_days_all_sis=ifelse(is.na(n_days_all_sis), 0, n_days_all_sis),
+                    n_sis_per_day=ifelse(is.na(n_sis_per_day), 0, n_sis_per_day),
+                    n_sis_per_day=ifelse(days_present<60, NA, n_sis_per_day)) %>%
+      distinct()
+    
+    
+    
+    #daughters
+    ##Step 3: count number of days both sister and subject were in the same social group
+    #this code separates kids of each female and calculates the percent of time
+    #each mom was with each kid
+    
+    daughters_present <-members_F_survival_adults_full_daughters %>%
+      semi_join(select(daughter_members, sname, grp, date ), 
+                by = c("kid_sname"="sname", "grp", "date")) %>%
+      filter(date >= start & date <= end) %>%
+      group_by(sname, start, grp) %>%
+      dplyr::summarise(days_present_matkin=n()) %>%
+      ungroup()  %>%
+      left_join(members_F_survival_adults_full_daughters, by=c('sname', 'start', 'grp')) %>%
+      semi_join(select(daughter_members, sname, grp, date ), 
+                by = c("kid_sname"="sname", "grp", "date")) %>%
+      filter(date >= start & date <= end) %>%
+      group_by(sname, start, grp) %>%
+      dplyr::mutate(keep=sample(1:days_present_matkin, days_present_matkin, replace=F)) %>%
+      ungroup()  %>%
+      filter(keep<=(x*days_present_matkin)) %>%
+      group_by(sname, age_class, start, grp, kid_sname) %>%
+      tally(name = "n_days_kid") %>%
+      ungroup() %>%
+      inner_join(select(members_F_survival_adults_full_daughters, sname, age_class, start, end, grp, days_present, kid_sname), 
+                 by=c('sname', 'start', 'grp', 'age_class', "kid_sname")) %>%
+      distinct() 
+    
+    
+    ##count all daughters that were in a social group in a given year and 
+    #divide that by the total number of days the subject was present in the group 
+    #to calculate an average number of daughters present per day
+    daughters_present2<-daughters_present%>%
+      group_by(sname, age_class, start, grp) %>%
+      dplyr::summarise(n_adult_daughters = n(),
+                       n_days_all_kid = sum(n_days_kid))%>%
+      ungroup()%>%
+      inner_join(select(members_F_survival_adults_full_daughters, sname, age_class, start, end, grp, days_present), 
+                 by=c('sname', 'start', 'grp', 'age_class')) %>%
+      distinct()%>%
+      dplyr::mutate(avg_kids_per_day = n_days_all_kid / (x*days_present)) %>%
+      ungroup()
+    
+    
+    ###Step 4: add zeros for subjects that do not have daughters present
+    ##adds zeros for individuals who's daughters were not present (e.g., absent) or NAs for individuals where data are sparse/absent
+    daughter_members_temp <-iyol_final %>%
+      left_join(select(daughters_present2, sname, grp, start, n_adult_daughters, n_days_all_kid, avg_kids_per_day), 
+                by = c("sname", "grp", "start")) %>%
+      dplyr::mutate(n_adult_daughters=ifelse(is.na(n_adult_daughters), 0, n_adult_daughters),
+                    n_days_all_kid=ifelse(is.na(n_days_all_kid), 0, n_days_all_kid),
+                    avg_kids_per_day=ifelse(is.na(avg_kids_per_day), 0, avg_kids_per_day),
+                    avg_kids_per_day=ifelse(days_present<60, NA, avg_kids_per_day)) %>%
+      distinct()
+    
+    
+    
+    # Combine all maternal relative info----------------------------
+    
+    maternal_kin <- mom_per_present %>%
+      inner_join(select(daughter_members_temp , sname, grp, start, end, n_adult_daughters, n_days_all_kid, avg_kids_per_day), 
+                 by = c("sname", "grp", "start", "end")) %>%
+      inner_join(select(sisters_members_temp,  sname, grp, start, end, n_adult_sisters, n_days_all_sis, n_sis_per_day), 
+                 by = c("sname", "grp", "start", "end")) %>%
+      dplyr::mutate(n_adult_mat_kin = percent_days_mom + avg_kids_per_day + n_sis_per_day) %>%
+      select(sname, grp, start, end,n_adult_mat_kin)
+  }
+  
+  matkin_comb <- lapply(c(0.01,0.05,0.16,0.33,0.5,0.65,0.82,1), days_matkin) 
+  
+  
+  iyol_final_matkin <- matkin_comb[[1]]%>%
+    left_join(matkin_comb[[2]], by = c("sname", "start", 'end', 'grp')) %>%
+    rename(n_adult_mat_kin01=n_adult_mat_kin.x,
+           n_adult_mat_kin5=n_adult_mat_kin.y) %>%
+    left_join(matkin_comb[[3]], by = c("sname", "start", 'end', 'grp')) %>%
+    rename(n_adult_mat_kin16=n_adult_mat_kin) %>%
+    left_join(matkin_comb[[4]], by = c("sname", "start", 'end', 'grp')) %>%
+    rename(n_adult_mat_kin33=n_adult_mat_kin)%>%
+    left_join(matkin_comb[[5]], by = c("sname", "start", 'end', 'grp')) %>%
+    rename(n_adult_mat_kin50=n_adult_mat_kin)%>%
+    left_join(matkin_comb[[6]], by = c("sname", "start", 'end', 'grp')) %>%
+    rename(n_adult_mat_kin65=n_adult_mat_kin)%>%
+    left_join(matkin_comb[[7]], by = c("sname", "start", 'end', 'grp')) %>%
+    rename(n_adult_mat_kin82=n_adult_mat_kin)%>%
+    left_join(matkin_comb[[8]], by = c("sname", "start", 'end', 'grp')) %>%
+    rename(n_adult_mat_kin1=n_adult_mat_kin) %>%
+    ungroup()
+  
+  
+  
+  mat_kin_sub <- select(iyol_final_matkin, n_adult_mat_kin01, n_adult_mat_kin5, n_adult_mat_kin16, n_adult_mat_kin33, n_adult_mat_kin50,  n_adult_mat_kin65, 
+                        n_adult_mat_kin82, n_adult_mat_kin1) %>%
+    dplyr::rename('1%'=n_adult_mat_kin01,'5%'=n_adult_mat_kin5, '16%'=n_adult_mat_kin16, 
+                  '33%'=n_adult_mat_kin33,'50%'=n_adult_mat_kin50,'65%'=n_adult_mat_kin65,
+                  '82%'=n_adult_mat_kin82,'100%'=n_adult_mat_kin1) 
+  
+  
+  mat_kin_sub <- select(mat_kin_sub, "1%", '5%', '16%', '33%','50%','65%','82%','100%')
+  
+  ggpairs(mat_kin_sub, title = "N Maternal Kin")
